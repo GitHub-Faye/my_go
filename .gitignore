@@ -2,3 +2,8 @@
 models/
 __pycache__/
 *.pyc
+
+# Rust native 内核构建产物
+src/kaya_go/_deadstones_rs/target/
+*.so
+*.pyd

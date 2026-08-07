@@ -108,3 +108,60 @@ def test_build_sign_map():
     assert smap[4][3] == 1  # (x=3, y=4) 黑
     assert smap[2][6] == -1  # (x=6, y=2) 白
     assert sum(1 for row in smap for v in row if v) == 2
+
+
+def _simple_board():
+    """一个 9 路简单局面：左上黑独立块、右下白独立块，互不交战。"""
+    smap = [[0] * 9 for _ in range(9)]
+    # 左上黑块（形成可死的孤棋，被空点包围）
+    for y, x in [(1, 1), (1, 2), (2, 1)]:
+        smap[y][x] = 1
+    # 右下白块
+    for y, x in [(6, 6), (6, 7), (7, 6)]:
+        smap[y][x] = -1
+    return smap
+
+
+def test_deadstones_endpoint(client):
+    """POST /api/v1/deadstones 返回 probabilityMap 与 deadStones。"""
+    res = client.post(
+        "/api/v1/deadstones",
+        json={"signMap": _simple_board(), "iterations": 200, "seed": 123},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["boardSize"] == 9
+    prob = body["probabilityMap"]
+    assert isinstance(prob, list) and len(prob) == 9
+    assert all(len(row) == 9 for row in prob)
+    assert all(isinstance(v, (int, float)) and -1 <= v <= 1 for row in prob for v in row)
+    assert isinstance(body["deadStones"], list)
+    for d in body["deadStones"]:
+        assert set(d) == {"x", "y"}
+        assert isinstance(d["x"], int) and isinstance(d["y"], int)
+    assert body["blackDeadStones"] >= 0
+    assert body["whiteDeadStones"] >= 0
+
+
+def test_deadstones_invalid(client):
+    """非法 signMap 被拒绝。"""
+    # 非正方形
+    r = client.post("/api/v1/deadstones", json={"signMap": [[0, 0], [0]]})
+    assert r.status_code == 400
+    # 非法值
+    r = client.post("/api/v1/deadstones", json={"signMap": [[2, 0], [0, 0]]})
+    assert r.status_code == 400
+    # 空
+    r = client.post("/api/v1/deadstones", json={"signMap": []})
+    assert r.status_code == 400
+
+
+def test_deadstones_empty_board_allalive(client):
+    """空棋盘的死子应为空，且无请求体校验错误。"""
+    smap = [[0] * 9 for _ in range(9)]
+    res = client.post("/api/v1/deadstones", json={"signMap": smap})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["boardSize"] == 9
+    assert body["deadStones"] == []
+    assert body["blackDeadStones"] == 0 and body["whiteDeadStones"] == 0

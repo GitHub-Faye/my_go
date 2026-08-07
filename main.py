@@ -11,13 +11,20 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from io import BytesIO
 from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from pydantic import BaseModel, Field
 from PIL import Image
 
+from kaya_go.deadstones import (
+    count_dead_stones,
+    derive_dead_stones,
+    get_probability_map,
+)
 from kaya_go.detector import MokuDetector
 from kaya_go.moku_postprocess import DEFAULT_THRESHOLD
 
@@ -37,6 +44,28 @@ MODEL_PATH = Path(os.environ.get("KAYA_MOKU_MODEL") or "models/moku-v3.onnx")
 
 # 全局单例会话（线程安全；模型加载一次）
 _detector: MokuDetector | None = None
+
+# 死子估计迭代次数默认值 —— 与前端 INITIAL_ITERATIONS=2000 一致
+DEFAULT_ITERATIONS = 2000
+
+
+class DeadStonesRequest(BaseModel):
+    """死子估计请求体。signMap 为 boardSize×boardSize 矩阵 1=黑/-1=白/0=空。
+
+    可直接传入 `/api/v1/recognize` 响应里的 `signMap`。
+    """
+
+    signMap: list[list[int]] = Field(..., description="棋盘状态矩阵 signMap[y][x]")
+    iterations: int = Field(default=DEFAULT_ITERATIONS, ge=1, le=100000)
+    seed: int | None = Field(default=None, description="随机种子；空则取当前时间")
+
+
+class DeadStonesResponse(BaseModel):
+    boardSize: int
+    probabilityMap: list[list[float]] | None = None
+    deadStones: list[dict[str, int]]
+    blackDeadStones: int
+    whiteDeadStones: int
 
 
 def get_detector() -> MokuDetector:
@@ -107,6 +136,43 @@ async def recognize(
         raise HTTPException(status_code=500, detail=f"识别失败：{e}")
 
     return result.to_dict()
+
+
+@app.post("/api/v1/deadstones")
+def deadstones(req: DeadStonesRequest):
+    """由棋盘状态(signMap)估计死子 → 纯 Monte Carlo,不依赖 ONNX 模型。
+
+    - 输入  `signMap`(来自 /api/v1/recognize 的响应) + 可选 iterations / seed
+    - 输出  `probabilityMap`(领地概率图 float ∈ [-1,1],正=黑控制)+ `deadStones`
+        + 各色死子计数,另含 `boardWithoutDead`(移除死子后的局面,供二次迭代)
+
+    iterations 语义与前端一致:前一半局白先手、后一半黑先手。
+    """
+    rows = req.signMap
+    # 先做防御性形状校验(inhomogeneous 的 list 会在 np.asarray 阶段抛 ValueError,
+    # 需在构造 numpy 数组前拦截,统一返回 400)。
+    if not rows or len(rows) not in (9, 13, 19) or any(
+        not isinstance(r, list) or len(r) != len(rows) for r in rows
+    ):
+        raise HTTPException(status_code=400, detail="signMap 须为 9/13/19 的正方形矩阵")
+    board = np.asarray(rows, dtype=np.int8)
+    h, w = board.shape
+    vals = set(np.unique(board).tolist())
+    if not vals.issubset({-1, 0, 1}):
+        raise HTTPException(status_code=400, detail="signMap 只允许取值 1/-1/0")
+
+    seed = req.seed if req.seed is not None else int(time.time() * 1000) % 0xFFFFFFFF
+    prob = get_probability_map(board, req.iterations, seed)
+
+    dead = derive_dead_stones(prob, req.signMap)
+    counts = count_dead_stones(req.signMap, dead)
+
+    return DeadStonesResponse(
+        boardSize=h,
+        probabilityMap=prob.tolist(),
+        deadStones=dead,
+        **counts,
+    )
 
 
 if __name__ == "__main__":

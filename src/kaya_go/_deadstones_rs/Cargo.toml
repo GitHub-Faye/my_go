@@ -1,0 +1,23 @@
+[package]
+name = "kaya_deadstones_native"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "kaya_deadstones_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+numpy = "0.23"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# 静态链接 libpython（可移植 wheel 不需要，开发环境 maturin develop 足够）
+[package.metadata.maturin]
+# 让编译出的扩展名带 .so 直接可被 `import` 发现
+module-name = "kaya_deadstones_native"
