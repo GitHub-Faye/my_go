@@ -74,11 +74,14 @@ async def recognize(
     boardSize: int = Query(default=19, ge=9, le=19),
     threshold: float = Query(default=DEFAULT_THRESHOLD, ge=0.0, le=1.0),
 ):
-    """识别一张围棋棋盘照片，返回棋盘状态、角点坐标与 SGF。
+    """识别一张围棋棋盘照片，返回棋盘状态、signMap、角点坐标与 SGF。
 
     - `image`  PNG/JPEG/WebP 等 Pillow 支持的格式
     - `boardSize` 9 / 13 / 19（默认 19）
     - `threshold` 石头检出置信度（默认 0.035）
+
+    返回的 `signMap` 为 boardSize×boardSize 矩阵：1=黑、-1=白、0=空
+    （signMap[y][x]），可直接作为死子估计接口的输入。
     """
     detector = get_detector()
 

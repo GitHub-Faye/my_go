@@ -23,6 +23,10 @@ class DetectedStone:
     y: int
     color: StoneColor
 
+    def sign(self) -> int:
+        """映射为 deadstones 的 Sign: 1=黑, -1=白。"""
+        return 1 if self.color == "black" else -1
+
 
 @dataclass
 class MokuRawDetection:
@@ -46,11 +50,25 @@ class RecognitionResult:
     moku_corner_count: int | None = None
     # 不返回 warpedImage（服务端无需回传大图）
 
+    def build_sign_map(self) -> list[list[int]]:
+        """由已识别石头构造 signMap：signMap[y][x] ∈ {1=黑, -1=白, 0=空}。
+
+        DetectedStone.x=列, y=行,故 signMap[y]=行,x=列。行列超出棋盘时跳过
+        （识别偶发散点）,保证输出恒为 board_size×board_size。
+        """
+        n = self.board_size
+        sign_map = [[0] * n for _ in range(n)]
+        for s in self.stones:
+            if 0 <= s.y < n and 0 <= s.x < n:
+                sign_map[s.y][s.x] = s.sign()
+        return sign_map
+
     # 序列化为 JSON 时的辅助方法，见 recognition.py 顶层的 serializer
     def to_dict(self) -> dict:
         return {
             "boardSize": self.board_size,
             "stones": [{"x": s.x, "y": s.y, "color": s.color} for s in self.stones],
+            "signMap": self.build_sign_map(),
             "corners": [list(pts) for pts in self.corners],
             "cornersDetected": self.corners_detected,
             "sgf": self.sgf,

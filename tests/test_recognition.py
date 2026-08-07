@@ -59,6 +59,15 @@ def test_recognize_endpoint(client, tmp_path):
     assert body["cornersDetected"] is True
     assert len(body["stones"]) >= 2
     assert body["sgf"].startswith("(;GM[1]FF[4]SZ[19]")
+    # signMap 为 19×19 矩阵；黑/白子数 ≤ 画上去的 2/2（白子置信度低可能漏检）
+    sign_map = body["signMap"]
+    assert isinstance(sign_map, list) and len(sign_map) == 19
+    assert all(isinstance(row, list) and len(row) == 19 for row in sign_map)
+    assert all(v in (-1, 0, 1) for row in sign_map for v in row)
+    black_count = sum(1 for row in sign_map for v in row if v == 1)
+    white_count = sum(1 for row in sign_map for v in row if v == -1)
+    assert black_count == 2  # 黑子稳定检出
+    assert white_count <= 2 and black_count + white_count >= 2
 
 
 def test_recognize_empty_file(client):
@@ -78,3 +87,24 @@ def test_detector_direct():
     r = d.detect(arr, board_size=19)
     assert r.corners_detected is True
     assert len(r.stones) == 2
+
+
+def test_build_sign_map():
+    """signMap 由 DetectedStone 构造：signMap[y][x]=1黑/-1白/0空。"""
+    from kaya_go.types import DetectedStone, RecognitionResult
+
+    stones = [
+        DetectedStone(x=3, y=4, color="black"),
+        DetectedStone(x=6, y=2, color="white"),
+    ]
+    smap = RecognitionResult(
+        board_size=9,
+        stones=stones,
+        corners=((0, 0), (0, 1), (1, 1), (1, 0)),
+        corners_detected=True,
+        sgf="",
+    ).build_sign_map()
+    assert len(smap) == 9 and all(len(row) == 9 for row in smap)
+    assert smap[4][3] == 1  # (x=3, y=4) 黑
+    assert smap[2][6] == -1  # (x=6, y=2) 白
+    assert sum(1 for row in smap for v in row if v) == 2
