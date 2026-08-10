@@ -7,3 +7,6 @@ __pycache__/
 src/kaya_go/_deadstones_rs/target/
 *.so
 *.pyd
+
+
+sample_front/

@@ -9,6 +9,7 @@ HTTP 服务。核心推理走 ONNX Runtime + moku-v3 RT-DETR 模型。
 """
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import time
@@ -162,12 +163,19 @@ async def recognize(
     image: UploadFile = File(...),
     boardSize: int = Query(default=19, ge=9, le=19),
     threshold: float = Query(default=DEFAULT_THRESHOLD, ge=0.0, le=1.0),
+    corners: str | None = Query(default=None, description="可选手工角点：x1,y1,x2,y2,x3,y3,x4,y4（TL/TR/BR/BL 顺时针）"),
 ):
     """识别一张围棋棋盘照片，返回棋盘状态、signMap、角点坐标与 SGF。
 
     - `image`  PNG/JPEG/WebP 等 Pillow 支持的格式
     - `boardSize` 9 / 13 / 19（默认 19）
     - `threshold` 石头检出置信度（默认 0.035）
+    - `corners` 可选；前端拖好 4 角后传入，服务端用用户角点替代 Moku 自动角点
+
+    响应在原有结果上新增三块供前端本地微调：
+      - `detections`  过阈值检出的原始 (class/score/cx/cy) —— 本地拖阈值 re-filter
+      - `warpedGray`  warped 灰度小图 base64 —— 本地重采样/标记黑白空
+      - `gridCorners` warped 坐标内的网格四角
 
     返回的 `signMap` 为 boardSize×boardSize 矩阵：1=黑、-1=白、0=空
     （signMap[y][x]），可直接作为死子估计接口的输入。
@@ -189,13 +197,53 @@ async def recognize(
         pil = pil.convert("RGBA")
     arr = np.asarray(pil)  # (H, W, 4)
 
+    # 解析用户角点（可选）：x1,y1,x2,y2,x3,y3,x4,y4 → [[x1,y1],...,[x4,y4]]
+    user_corners = None
+    if corners:
+        parts = [float(p) for p in corners.split(",")]
+        if len(parts) != 8:
+            raise HTTPException(status_code=400, detail="corners 须为 x1,y1,x2,y2,x3,y3,x4,y4")
+        user_corners = (
+            (parts[0], parts[1]),
+            (parts[2], parts[3]),
+            (parts[4], parts[5]),
+            (parts[6], parts[7]),
+        )
+
     try:
-        result = detector.detect(arr, board_size=boardSize, threshold=threshold)
+        result, raw_detections, warped_gray = detector.detect_full(
+            arr,
+            board_size=boardSize,
+            threshold=threshold,
+            corners=user_corners,
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception("识别失败")
         raise HTTPException(status_code=500, detail=f"识别失败：{e}")
 
-    return result.to_dict()
+    body = result.to_dict()
+    # 新增中间产物（前后端分离：本地 refilter / 标记黑白空）
+    body["detections"] = [
+        {"class": d.class_id, "score": round(d.score, 4), "cx": d.cx, "cy": d.cy}
+        for d in raw_detections
+    ]
+    # warped 灰度小图 → 单通道 uint8 PNG base64
+    from PIL import Image as PILImage
+
+    gray_img = PILImage.fromarray(warped_gray, mode="L")
+    buf = BytesIO()
+    gray_img.save(buf, format="PNG")
+    body["warpedGray"] = {
+        "width": gray_img.width,
+        "height": gray_img.height,
+        "dataBase64": base64.b64encode(buf.getvalue()).decode("ascii"),
+    }
+    if result.estimated_grid_corners:
+        body["gridCorners"] = [list(pts) for pts in result.estimated_grid_corners]
+    else:
+        body["gridCorners"] = None
+
+    return body
 
 
 @app.post("/api/v1/deadstones")

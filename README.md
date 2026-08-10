@@ -30,6 +30,11 @@ multipart 上传，识别一张围棋棋盘照片。
 | `image`     | 文件    | PNG/JPEG/WebP 等（Pillow 支持）           |
 | `boardSize` | int     | 9 / 13 / 19，默认 19                     |
 | `threshold` | float   | 石头置信度，默认 0.035                   |
+| `corners`   | query   | 可选手工角点：`x1,y1,x2,y2,x3,y3,x4,y4`（TL/TR/BR/BL） |
+
+`corners` 交互流程：前端先在网页端拖好 4 个角点再上传。传了 `corners` 时
+服务端**跳过 Moku 自动角点推断**，直接用用户角点做透视校正与网格映射；
+`gridCorners` 返回 `null`（此时由用户在前端拖定，不再内缩 8% 边距）。
 
 响应（对齐浏览器端 `RecognitionResult` 的 JSON 形态）：
 
@@ -43,12 +48,26 @@ multipart 上传，识别一张围棋棋盘照片。
   "sgf": "(;GM[1]FF[4]SZ[19]AP[Kaya Board Recognition]AB[pe][dd]\n)",
   "estimatedGridCorners": null,
   "mokuRawCorners": null,
-  "mokuCornerCount": 4
+  "mokuCornerCount": 4,
+  "detections": [{ "class": 0, "score": 0.87, "cx": 512.3, "cy": 198.1 }],
+  "warpedGray": { "width": 400, "height": 400, "dataBase64": "iVBOR…" },
+  "gridCorners": [[64, 64], [735, 64], [735, 735], [64, 735]]  // 用户角点时 null
 }
 ```
 
 `corners` 为图像坐标系中棋盘四角 [TL, TR, BR, BL]。`signMap` 可直接作为
 `/api/v1/deadstones` 的输入。
+
+新增三块**前后端分离中间产物**，供前端在本地做「阈值微调 / 标记黑白空」而无需
+重新上传整图重跑 ONNX：
+
+- **`detections`** —— 过阈值检出的原始 `(class, score, cx, cy)`。前端缓存后，拖
+  敏感度滑杆只需按新 `score` 阈值本地 re-filter 并重新做网格映射（~0.1ms），
+  完全不碰模型。
+- **`warpedGray`** —— warped 后 400×400 单通道灰度 base64。前端本地重采样
+  （`sampleGrid` 亮度 + kmeans 分级）即可复算全盘分类，用于「标记黑白空」。
+- **`gridCorners`** —— warped 坐标内网格四角；自动角点时是内插 8% 边距的方形，
+  供前端网格定位；用户角点时 `null`。
 
 ### `POST /api/v1/deadstones`
 

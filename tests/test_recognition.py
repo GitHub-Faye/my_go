@@ -68,6 +68,53 @@ def test_recognize_endpoint(client, tmp_path):
     white_count = sum(1 for row in sign_map for v in row if v == -1)
     assert black_count == 2  # 黑子稳定检出
     assert white_count <= 2 and black_count + white_count >= 2
+    # 前后端分离新增的中间产物
+    assert "detections" in body and isinstance(body["detections"], list)
+    for d in body["detections"]:
+        assert set(d) >= {"class", "score", "cx", "cy"}
+    assert "warpedGray" in body
+    wg = body["warpedGray"]
+    assert wg["width"] == 800 and wg["height"] == 800
+    assert wg["dataBase64"]
+    assert "gridCorners" in body
+    # warpedGray 与 gridCorners 同一次 warp：网格角点坐标应落在 0..799 内
+    gc = body["gridCorners"]
+    assert gc is not None
+    assert all(0 <= v[0] < 800 and 0 <= v[1] < 800 for v in gc)
+
+
+def test_recognize_with_user_corners(client, tmp_path):
+    """传入手工角点后服务端用用户角点替代 Moku 自动角点做 warp。"""
+    img_path = _make_board(path=tmp_path / "board2.png")
+    with img_path.open("rb") as f:
+        res = client.post(
+            "/api/v1/recognize?corners=31,30,671,30,670,669,30,670",
+            files={"image": ("board2.png", f, "image/png")},
+            data={"boardSize": "19"},
+        )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["cornersDetected"] is True
+    assert len(body["stones"]) >= 2
+    # 用户角点路径走统一的 warp 空间网格（8% 内缩的 800 方形），不再为 None
+    assert body["gridCorners"] is not None
+    gc = body["gridCorners"]
+    # 8% 内缩：m = round(800*0.08) = 64
+    assert gc[0] == [64, 64] and gc[1] == [735, 64] and gc[2] == [735, 735] and gc[3] == [64, 735]
+    # warpedGray 与 gridCorners 同坐标系
+    wg = body["warpedGray"]
+    assert wg["width"] == 800 and wg["height"] == 800
+
+
+def test_recognize_bad_corners(client, tmp_path):
+    """非法 corners 参数被 400 拒绝。"""
+    img_path = _make_board(path=tmp_path / "board3.png")
+    with img_path.open("rb") as f:
+        res = client.post(
+            "/api/v1/recognize?corners=1,2",
+            files={"image": ("board3.png", f, "image/png")},
+        )
+    assert res.status_code == 400
 
 
 def test_recognize_empty_file(client):
