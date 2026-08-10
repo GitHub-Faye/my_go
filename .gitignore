@@ -8,5 +8,7 @@ src/kaya_go/_deadstones_rs/target/
 *.so
 *.pyd
 
-
-sample_front/
+# ── sample_front（前端样品）生成物 / 依赖 ──
+sample_front/node_modules/
+sample_front/dist/
+sample_front/*.local

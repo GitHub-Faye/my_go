@@ -1,0 +1,24 @@
+{
+  "name": "kaya-go-sample-front",
+  "version": "0.1.0",
+  "private": true,
+  "description": "前后端分离样品 —— 网页端拖 4 角 → 上传后端推理 → 本地拖阈值/标记黑白空",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.4.0",
+    "typescript": "^5.8.0",
+    "vite": "^6.3.0"
+  }
+}
