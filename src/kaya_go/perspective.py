@@ -8,9 +8,6 @@ from .types import BoardCorners, Point
 
 EPS = 1e-12
 
-# type hint 简化（服务端用 numpy 数组表示图像）
-RawImage = tuple  # 占位；实际传 (numpy.rgba, w, h) 见 recognition.py
-
 
 def _solve_linear(A: list[list[float]], b: list[float]) -> list[float] | None:
     """高斯消元求解 8x8 线性系统，奇异返回 None。对齐 TS solveLinear。"""

@@ -81,13 +81,14 @@ multipart 上传，识别一张围棋棋盘照片。
 ### `POST /api/v1/score`
 
 由 `signMap` + `deadStones`(可带 `probabilityMap`)计算领地与最终分数。数据一般
-来自 `/api/v1/deadstones` 的响应链(先 recognize 得 signMap,再 deadstones 得死子与概率图)。
+来自 `/api/v1/deadstones` 的响应链(先 recognize 得 signMap,再 deadstones 得死子与概率图;
+估计路径建议在死子清零的盘上重跑 deadstones 以取得匹配的 `probabilityMap`)。
 
 | 字段              | 类型             | 说明                                                          |
 | ----------------- | ---------------- | ------------------------------------------------------------- |
 | `signMap`         | int[][] (9/13/19)| 棋盘状态 1=黑 / -1=白 / 0=空                                  |
 | `deadStones`      | [{x,y}]          | 死子坐标(来自 deadstones 响应的 `deadStones`),默认空          |
-| `komi`            | float            | 黑方贴目,计入黑方得分(默认 0)                                 |
+| `komi`            | float            | 贴目,计入**白方**得分(默认 0,对齐前端 ScoreEstimator)        |
 | `probabilityMap`  | float[][]?       | 领地概率图(可选);传则走「估计路径」补单官,不传只用 flood fill |
 | `useEstimated`    | bool             | 是否用概率图补单官(默认 true;不传 probabilityMap 时忽略)      |
 
@@ -101,17 +102,18 @@ multipart 上传，识别一张围棋棋盘照片。
   "whiteTerritory": 18,
   "blackCaptures": 0,        // 提子数来自对局历史,HTTP 场景未知,恒为 0
   "whiteCaptures": 0,
-  "blackDeadStones": 0,
-  "whiteDeadStones": 0,
+  "blackDeadStones": 0,      // 黑方的死子
+  "whiteDeadStones": 0,      // 白方的死子
   "komi": 6.5,
-  "blackScore": 24.5,        // 领地 + 死子 + 贴目
-  "whiteScore": 18.0
+  "blackScore": 24.5,        // 黑地 + 白死子
+  "whiteScore": 24.0         // 白地 + 黑死子 + 贴目
 }
 ```
 
-记分语义逐函数对应前端 `packages/ui/src/services/scoring.ts`:
-死子清零后 flood fill 判封口领地(`calculateTerritory`),剩余单官点再按
-`probabilityMap` 的 ±0.2 阈值补齐(`calculateEstimatedTerritory`)。
+记分语义逐函数对应前端 `packages/ui/src/services/scoring.ts` 与
+`ScoreEstimator.tsx`:死子清零后 flood fill 判封口领地(`calculateTerritory`),
+剩余单官点再按 `probabilityMap` 的 ±0.2 阈值补齐(`calculateEstimatedTerritory`);
+最终得分黑方=黑地+白死子,白方=白地+黑死子+贴目。
 
 ## 模型
 

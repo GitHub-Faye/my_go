@@ -53,6 +53,27 @@ _detector: MokuDetector | None = None
 # 死子估计迭代次数默认值 —— 与前端 INITIAL_ITERATIONS=2000 一致
 DEFAULT_ITERATIONS = 2000
 
+# 合法棋盘尺寸:9 / 13 / 19 路
+VALID_SIZES = (9, 13, 19)
+
+
+def _validate_sign_map(rows: list[list[int]]) -> tuple[int, int]:
+    """校验 signMap 为 9/13/19 的正方形矩阵、取值仅 -1/0/1。
+
+    先做防御性形状校验:inhomogeneous 的 list 会在 np.asarray 阶段抛 ValueError,
+    需在构造 numpy 数组前拦截,统一返回 400。返回 (height, width)。
+    """
+    if not rows or len(rows) not in VALID_SIZES or any(
+        not isinstance(r, list) or len(r) != len(rows) for r in rows
+    ):
+        raise HTTPException(status_code=400, detail="signMap 须为 9/13/19 的正方形矩阵")
+    board = np.asarray(rows, dtype=np.int8)
+    h, w = board.shape
+    vals = set(np.unique(board).tolist())
+    if not vals.issubset({-1, 0, 1}):
+        raise HTTPException(status_code=400, detail="signMap 只允许取值 1/-1/0")
+    return h, w
+
 
 class DeadStonesRequest(BaseModel):
     """死子估计请求体。signMap 为 boardSize×boardSize 矩阵 1=黑/-1=白/0=空。
@@ -74,7 +95,7 @@ class DeadStonesResponse(BaseModel):
 
 
 class ScoreRequest(BaseModel):
-    """记分请求体。deadStones 来自 `/api/v1/deadstones` 响应;komi 为黑方贴目。
+    """记分请求体。deadStones 来自 `/api/v1/deadstones` 响应;komi 为白方贴目。
 
     可传 `probabilityMap`(来自 deadstones 响应)走估计路径;不传则只用
     flood fill 精确路径——此时 `useEstimated` 被忽略。
@@ -84,7 +105,7 @@ class ScoreRequest(BaseModel):
     deadStones: list[dict[str, int]] = Field(
         default_factory=list, description="死子坐标列表 [{x, y}, ...]"
     )
-    komi: float = Field(default=0.0, description="黑方贴目")
+    komi: float = Field(default=0.0, description="白方贴目")
     probabilityMap: list[list[float]] | None = Field(
         default=None, description="领地概率图(可选;传则走估计路径)"
     )
@@ -183,22 +204,13 @@ def deadstones(req: DeadStonesRequest):
 
     - 输入  `signMap`(来自 /api/v1/recognize 的响应) + 可选 iterations / seed
     - 输出  `probabilityMap`(领地概率图 float ∈ [-1,1],正=黑控制)+ `deadStones`
-        + 各色死子计数,另含 `boardWithoutDead`(移除死子后的局面,供二次迭代)
+        + 各色死子计数。作为记分的前置:同 `probabilityMap`(原始盘)命中死子后,
+        记分端应先在死子清零的盘上重跑本接口,再取 `probabilityMap` 走估计路径。
 
     iterations 语义与前端一致:前一半局白先手、后一半黑先手。
     """
-    rows = req.signMap
-    # 先做防御性形状校验(inhomogeneous 的 list 会在 np.asarray 阶段抛 ValueError,
-    # 需在构造 numpy 数组前拦截,统一返回 400)。
-    if not rows or len(rows) not in (9, 13, 19) or any(
-        not isinstance(r, list) or len(r) != len(rows) for r in rows
-    ):
-        raise HTTPException(status_code=400, detail="signMap 须为 9/13/19 的正方形矩阵")
-    board = np.asarray(rows, dtype=np.int8)
-    h, w = board.shape
-    vals = set(np.unique(board).tolist())
-    if not vals.issubset({-1, 0, 1}):
-        raise HTTPException(status_code=400, detail="signMap 只允许取值 1/-1/0")
+    h, w = _validate_sign_map(req.signMap)
+    board = np.asarray(req.signMap, dtype=np.int8)
 
     seed = req.seed if req.seed is not None else int(time.time() * 1000) % 0xFFFFFFFF
     prob = get_probability_map(board, req.iterations, seed)
@@ -219,33 +231,23 @@ def score(req: ScoreRequest):
     """由 signMap + deadStones(可带 probabilityMap)计算领地与分数。
 
     - `signMap`/`deadStones`/`probabilityMap` 均来自 `/api/v1/deadstones` 的响应链,
-      其中 `probabilityMap` 需与移除死子后的局面匹配才准确。
-    - `komi` 计入黑方得分(白方获胜时的贴目退让)。
+      其中 `probabilityMap` 需与移除死子后的局面匹配才准确(即命中死子后,先在死子
+      清零的盘上重跑 deadstones 接口)。
+    - `komi` 计入白方得分(黑方先行的贴目。按 Kaya 前端 ScoreEstimator 约定)。
     - 记分语义对应 Kaya 前端 scoring.ts:死子清零后 flood fill 判封口领地,
       剩余单官点若提供概率图再用 ±0.2 阈值补齐(估计路径)。
 
     响应含 territoryMap(1=黑地 / -1=白地 / 0=单官)与黑白最终得分。
     """
-    rows = req.signMap
-    if not rows or len(rows) not in (9, 13, 19) or any(
-        not isinstance(r, list) or len(r) != len(rows) for r in rows
-    ):
-        raise HTTPException(status_code=400, detail="signMap 须为 9/13/19 的正方形矩阵")
-    board = np.asarray(rows, dtype=np.int8)
-    h, w = board.shape
-    vals = set(np.unique(board).tolist())
-    if not vals.issubset({-1, 0, 1}):
-        raise HTTPException(status_code=400, detail="signMap 只允许取值 1/-1/0")
+    h, w = _validate_sign_map(req.signMap)
 
     dead = parse_dead_stones(req.deadStones)
-    # 与死子接口输出一致,再核对一次取值范围
     for x, y in dead:
         if not (0 <= x < w and 0 <= y < h):
             raise HTTPException(status_code=400, detail=f"死子坐标越界:({x},{y})")
 
-    # deadStones 计数:与 /api/v1/deadstones 的计数保持一致(按子色统计)
-    black_dead = sum(1 for x, y in dead if rows[y][x] == 1)
-    white_dead = sum(1 for x, y in dead if rows[y][x] == -1)
+    # 死子计数 + 领地计算统一委托领域模块,避免与 /deadstones 端点各算一套
+    counts = count_dead_stones(req.signMap, req.deadStones)
 
     if req.useEstimated and req.probabilityMap is not None:
         result = compute_estimated_territory(req.signMap, req.probabilityMap, dead)
@@ -254,10 +256,13 @@ def score(req: ScoreRequest):
 
     black_territory = result["blackTerritory"]
     white_territory = result["whiteTerritory"]
+    black_dead = counts["blackDeadStones"]
+    white_dead = counts["whiteDeadStones"]
 
-    # 分数:领地 + 贴目(黑方得贴目)。capture 由对局历史提供,HTTP 场景未知,置 0。
-    black_score = black_territory + black_dead + req.komi
-    white_score = white_territory + white_dead
+    # 分数,对齐前端 ScoreEstimator:黑方得「白死子 + 黑地」,白方得「黑死子 + 白地 + komi」。
+    # capture(提子数)由对局历史提供,HTTP 场景未知,置 0。
+    black_score = black_territory + white_dead
+    white_score = white_territory + black_dead + req.komi
 
     return ScoreResponse(
         boardSize=h,

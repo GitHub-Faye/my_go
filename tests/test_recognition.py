@@ -191,10 +191,12 @@ def test_score_endpoint(client):
     assert body["blackTerritory"] >= 0 and body["whiteTerritory"] >= 0
     assert body["blackDeadStones"] == ds["blackDeadStones"]
     assert body["whiteDeadStones"] == ds["whiteDeadStones"]
-    # komi 只影响黑方
+    # komi 计入白方(黑先的贴目);各得对方死子数
     assert body["komi"] == 6.5
-    assert body["blackScore"] == body["blackTerritory"] + body["blackDeadStones"] + 6.5
-    assert body["whiteScore"] == body["whiteTerritory"] + body["whiteDeadStones"]
+    assert body["blackScore"] == body["blackTerritory"] + body["whiteDeadStones"]
+    assert (
+        body["whiteScore"] == body["whiteTerritory"] + body["blackDeadStones"] + 6.5
+    )
 
 
 def test_score_floodfill_only(client):
