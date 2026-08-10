@@ -26,6 +26,11 @@ from kaya_go.deadstones import (
     get_probability_map,
 )
 from kaya_go.detector import MokuDetector
+from kaya_go.scoring import (
+    compute_estimated_territory,
+    compute_territory,
+    parse_dead_stones,
+)
 from kaya_go.moku_postprocess import DEFAULT_THRESHOLD
 
 logging.basicConfig(level=logging.INFO)
@@ -66,6 +71,40 @@ class DeadStonesResponse(BaseModel):
     deadStones: list[dict[str, int]]
     blackDeadStones: int
     whiteDeadStones: int
+
+
+class ScoreRequest(BaseModel):
+    """记分请求体。deadStones 来自 `/api/v1/deadstones` 响应;komi 为黑方贴目。
+
+    可传 `probabilityMap`(来自 deadstones 响应)走估计路径;不传则只用
+    flood fill 精确路径——此时 `useEstimated` 被忽略。
+    """
+
+    signMap: list[list[int]] = Field(..., description="棋盘状态矩阵 signMap[y][x]")
+    deadStones: list[dict[str, int]] = Field(
+        default_factory=list, description="死子坐标列表 [{x, y}, ...]"
+    )
+    komi: float = Field(default=0.0, description="黑方贴目")
+    probabilityMap: list[list[float]] | None = Field(
+        default=None, description="领地概率图(可选;传则走估计路径)"
+    )
+    useEstimated: bool = Field(
+        default=True, description="是否用 probabilityMap 补单官(默认开,忽略单官为中立)"
+    )
+
+
+class ScoreResponse(BaseModel):
+    boardSize: int
+    territoryMap: list[list[int]]
+    blackTerritory: int
+    whiteTerritory: int
+    blackCaptures: int = 0
+    whiteCaptures: int = 0
+    whiteDeadStones: int
+    blackDeadStones: int
+    komi: float
+    blackScore: float
+    whiteScore: float
 
 
 def get_detector() -> MokuDetector:
@@ -172,6 +211,66 @@ def deadstones(req: DeadStonesRequest):
         probabilityMap=prob.tolist(),
         deadStones=dead,
         **counts,
+    )
+
+
+@app.post("/api/v1/score")
+def score(req: ScoreRequest):
+    """由 signMap + deadStones(可带 probabilityMap)计算领地与分数。
+
+    - `signMap`/`deadStones`/`probabilityMap` 均来自 `/api/v1/deadstones` 的响应链,
+      其中 `probabilityMap` 需与移除死子后的局面匹配才准确。
+    - `komi` 计入黑方得分(白方获胜时的贴目退让)。
+    - 记分语义对应 Kaya 前端 scoring.ts:死子清零后 flood fill 判封口领地,
+      剩余单官点若提供概率图再用 ±0.2 阈值补齐(估计路径)。
+
+    响应含 territoryMap(1=黑地 / -1=白地 / 0=单官)与黑白最终得分。
+    """
+    rows = req.signMap
+    if not rows or len(rows) not in (9, 13, 19) or any(
+        not isinstance(r, list) or len(r) != len(rows) for r in rows
+    ):
+        raise HTTPException(status_code=400, detail="signMap 须为 9/13/19 的正方形矩阵")
+    board = np.asarray(rows, dtype=np.int8)
+    h, w = board.shape
+    vals = set(np.unique(board).tolist())
+    if not vals.issubset({-1, 0, 1}):
+        raise HTTPException(status_code=400, detail="signMap 只允许取值 1/-1/0")
+
+    dead = parse_dead_stones(req.deadStones)
+    # 与死子接口输出一致,再核对一次取值范围
+    for x, y in dead:
+        if not (0 <= x < w and 0 <= y < h):
+            raise HTTPException(status_code=400, detail=f"死子坐标越界:({x},{y})")
+
+    # deadStones 计数:与 /api/v1/deadstones 的计数保持一致(按子色统计)
+    black_dead = sum(1 for x, y in dead if rows[y][x] == 1)
+    white_dead = sum(1 for x, y in dead if rows[y][x] == -1)
+
+    if req.useEstimated and req.probabilityMap is not None:
+        result = compute_estimated_territory(req.signMap, req.probabilityMap, dead)
+    else:
+        result = compute_territory(req.signMap, dead)
+
+    black_territory = result["blackTerritory"]
+    white_territory = result["whiteTerritory"]
+
+    # 分数:领地 + 贴目(黑方得贴目)。capture 由对局历史提供,HTTP 场景未知,置 0。
+    black_score = black_territory + black_dead + req.komi
+    white_score = white_territory + white_dead
+
+    return ScoreResponse(
+        boardSize=h,
+        territoryMap=result["territories"],
+        blackTerritory=black_territory,
+        whiteTerritory=white_territory,
+        blackCaptures=0,
+        whiteCaptures=0,
+        blackDeadStones=black_dead,
+        whiteDeadStones=white_dead,
+        komi=req.komi,
+        blackScore=black_score,
+        whiteScore=white_score,
     )
 
 

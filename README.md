@@ -78,6 +78,41 @@ multipart 上传，识别一张围棋棋盘照片。
 { "status": "ok", "model_loaded": true, "model_exists": true }
 ```
 
+### `POST /api/v1/score`
+
+由 `signMap` + `deadStones`(可带 `probabilityMap`)计算领地与最终分数。数据一般
+来自 `/api/v1/deadstones` 的响应链(先 recognize 得 signMap,再 deadstones 得死子与概率图)。
+
+| 字段              | 类型             | 说明                                                          |
+| ----------------- | ---------------- | ------------------------------------------------------------- |
+| `signMap`         | int[][] (9/13/19)| 棋盘状态 1=黑 / -1=白 / 0=空                                  |
+| `deadStones`      | [{x,y}]          | 死子坐标(来自 deadstones 响应的 `deadStones`),默认空          |
+| `komi`            | float            | 黑方贴目,计入黑方得分(默认 0)                                 |
+| `probabilityMap`  | float[][]?       | 领地概率图(可选);传则走「估计路径」补单官,不传只用 flood fill |
+| `useEstimated`    | bool             | 是否用概率图补单官(默认 true;不传 probabilityMap 时忽略)      |
+
+响应(对齐前端 `ScoreData` 的 JSON 形态):
+
+```jsonc
+{
+  "boardSize": 9,
+  "territoryMap": [/* 1=黑地 / -1=白地 / 0=单官中立 */],
+  "blackTerritory": 18,
+  "whiteTerritory": 18,
+  "blackCaptures": 0,        // 提子数来自对局历史,HTTP 场景未知,恒为 0
+  "whiteCaptures": 0,
+  "blackDeadStones": 0,
+  "whiteDeadStones": 0,
+  "komi": 6.5,
+  "blackScore": 24.5,        // 领地 + 死子 + 贴目
+  "whiteScore": 18.0
+}
+```
+
+记分语义逐函数对应前端 `packages/ui/src/services/scoring.ts`:
+死子清零后 flood fill 判封口领地(`calculateTerritory`),剩余单官点再按
+`probabilityMap` 的 ±0.2 阈值补齐(`calculateEstimatedTerritory`)。
+
 ## 模型
 
 - 默认从 `models/moku-v3.onnx` 加载（已在 `.gitignore` 中排除，请自行放置或从
@@ -96,6 +131,7 @@ my_go/
 │   ├── perspective.py         # 单应矩阵 + 透视校正
 │   ├── sgf.py                 # SGF 生成
 │   ├── deadstones.py          # 死子/领地估计（薄封装，委托原生 Rust 内核）
+│   ├── scoring.py             # 领地/记分（flood fill + 概率图补单官）
 │   ├── types.py               # 数据模型
 │   └── _deadstones_rs/        # Rust 原生内核（PyO3/maturin）
 │       ├── Cargo.toml

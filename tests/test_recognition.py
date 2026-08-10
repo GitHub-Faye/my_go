@@ -165,3 +165,67 @@ def test_deadstones_empty_board_allalive(client):
     assert body["boardSize"] == 9
     assert body["deadStones"] == []
     assert body["blackDeadStones"] == 0 and body["whiteDeadStones"] == 0
+
+
+def test_score_endpoint(client):
+    """记分接口:提供 probabilityMap 走估计路径,komi 计入黑方。"""
+    smap = _simple_board()
+    # 复用死子接口的概率图与死子,构造完整记分请求
+    ds = client.post("/api/v1/deadstones", json={"signMap": smap, "iterations": 200, "seed": 123}).json()
+    res = client.post(
+        "/api/v1/score",
+        json={
+            "signMap": smap,
+            "deadStones": ds["deadStones"],
+            "probabilityMap": ds["probabilityMap"],
+            "komi": 6.5,
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["boardSize"] == 9
+    territory_map = body["territoryMap"]
+    assert isinstance(territory_map, list) and len(territory_map) == 9
+    assert all(len(row) == 9 for row in territory_map)
+    assert all(v in (-1, 0, 1) for row in territory_map for v in row)
+    assert body["blackTerritory"] >= 0 and body["whiteTerritory"] >= 0
+    assert body["blackDeadStones"] == ds["blackDeadStones"]
+    assert body["whiteDeadStones"] == ds["whiteDeadStones"]
+    # komi 只影响黑方
+    assert body["komi"] == 6.5
+    assert body["blackScore"] == body["blackTerritory"] + body["blackDeadStones"] + 6.5
+    assert body["whiteScore"] == body["whiteTerritory"] + body["whiteDeadStones"]
+
+
+def test_score_floodfill_only(client):
+    """不提供 probabilityMap 时退化为纯 flood fill,deadStones 清零。"""
+    smap = _simple_board()
+    res = client.post(
+        "/api/v1/score",
+        json={
+            "signMap": smap,
+            "deadStones": [{"x": 1, "y": 1}, {"x": 1, "y": 2}, {"x": 2, "y": 1}],
+            "komi": 0,
+            "useEstimated": False,
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    territory_map = body["territoryMap"]
+    # 左上的黑孤块被标记为死子后清零,其位置区域应判给周围——即白地或单官,不会是黑地
+    assert territory_map[1][1] != 1
+    assert body["blackDeadStones"] == 3
+    assert body["whiteDeadStones"] == 0
+
+
+def test_score_invalid(client):
+    """非法 signMap 被拒绝。"""
+    r = client.post("/api/v1/score", json={"signMap": [[0, 0], [0]]})
+    assert r.status_code == 400
+    r = client.post("/api/v1/score", json={"signMap": [[2, 0], [0, 0]]})
+    assert r.status_code == 400
+    # 死子坐标越界
+    r = client.post(
+        "/api/v1/score", json={"signMap": [[0] * 9 for _ in range(9)], "deadStones": [{"x": 99, "y": 0}]}
+    )
+    assert r.status_code == 400
