@@ -135,20 +135,17 @@ export default function BoardPreview({
       ctx.fill();
     }
 
-    // 用户标记（黑/白/空）
+    // 用户手标（与检出棋子同规格的透明点）：标黑→蓝点、标白→红点、标空→去掉该点
     for (const [key, color] of hints) {
+      if (color === 'empty') continue; // 空标记由全盘重分类把该点去掉，无需绘制
       const [cx0, cy0] = key.split(',').map(Number);
       const [cx, cy] = gridToCanvas(cx0, cy0, boardSize, scale, gridCorners);
-      const d = Math.max(4, cellPx * 0.18);
       ctx.beginPath();
-      ctx.moveTo(cx, cy - d);
-      ctx.lineTo(cx + d, cy);
-      ctx.lineTo(cx, cy + d);
-      ctx.lineTo(cx - d, cy);
-      ctx.closePath();
-      ctx.fillStyle = color === 'black' ? '#00e5ff' : color === 'white' ? '#ff6600' : '#44ff44';
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = color === 'black' ? 'rgba(0, 180, 255, 0.85)' : 'rgba(255, 80, 0, 0.85)';
       ctx.fill();
-      ctx.strokeStyle = '#fff';
+      // 白色细环，与模型检出点区分，提示这是用户手标
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
       ctx.lineWidth = 1.5;
       ctx.stroke();
     }

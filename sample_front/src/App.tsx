@@ -5,11 +5,11 @@
  * ② 上传原图 + corners → 后端推理 ONNX
  * ③ 拿回结果 → 本地拖阈值 + 标记黑白空 → 得最终棋局（全部本地重算，不重传图）
  */
-import { useCallback, useRef, useState, useEffect, useMemo } from 'react';
+import { useCallback, useRef, useState, useMemo } from 'react';
 import CornerEditor from './components/CornerEditor';
 import BoardPreview from './components/BoardPreview';
-import { filterAndMapStones, classifyWithHints, type BoardCorners, type CalibrationHint } from './lib/geometry';
-import type { RecognizeResponse, DetectedStone } from './types';
+import { filterAndMapStones, type DetectedStone, type BoardCorners } from './lib/geometry';
+import type { RecognizeResponse, StoneColor } from './types';
 
 // 灵敏度滑杆（0..1）直接对应原版 Kaya 的 mokuThreshold：默认 0.965（高敏感）。
 // 显示的阈值 = 1 − 灵敏度：灵敏度越高 → 阈值越低 → 显示更多棋子。
@@ -39,7 +39,6 @@ export default function App() {
   const [sensitivity, setSensitivity] = useState(DEFAULT_SENSITIVITY); // 0..1 灵敏度
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const warpedGrayCanvasRef = useRef<HTMLCanvasElement>(null);
 
   // 原图（本地 refilter / classify 需要原图做 warp？—— 用服务端返回的 corners + warpedGray 即可）
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -111,58 +110,25 @@ export default function App() {
     return filterAndMapStones(result.detections, result.corners as any, result.boardSize, threshold);
   }, [result, threshold]);
 
-  // ── ③b 本地黑白空重分类（warpedGray → 全盘 classifyWithHints）──
-  const hintedStones = useMemo<DetectedStone[]>(() => {
-    if (!result || !warpedGrayCanvasRef.current) return refinedStones;
-    // 把 warpedGray base64 画上 canvas 取灰度数据
-    const cv = warpedGrayCanvasRef.current;
-    const ctx = cv.getContext('2d');
-    if (!ctx) return refinedStones;
-
-    const img = new Image();
-    void img;
-    // 数据已在 useEffect 里画好（见下方渲染加载）——这里保证 canvas 已填好
-    // 直接读取 canvas 像素
-    const data = ctx.getImageData(0, 0, cv.width, cv.height).data;
-    const gray = new Float32Array(cv.width * cv.height);
-    for (let i = 0; i < gray.length; i++) {
-      gray[i] = data[i * 4]; // R 通道即灰度（L 模式）
-    }
-    const hintList: CalibrationHint[] = [...hints.entries()].map(([key, color]) => {
+  // ── ③c' 手动标记 = 本地强制覆盖（仅改被点的那一格，其它格不动）──
+  // 用户标黑/标白/标空只叠加在细化结果之上：
+  //  - 标黑/标白 → 该格强制为对应颜色（不管模型原来怎么判）
+  //  - 标空     → 从结果里去掉该格
+  // 不再走全盘重分类（classifyWithHints），避免一个标记带动其它格子变色。
+  const finalizedStones = useMemo<DetectedStone[]>(() => {
+    if (hints.size === 0) return refinedStones;
+    const overridden = new Map<string, StoneColor | 'empty'>();
+    for (const [key, color] of hints) overridden.set(key, color);
+    const out = refinedStones.filter(s => !overridden.has(`${s.x},${s.y}`) || overridden.get(`${s.x},${s.y}`) === s.color);
+    for (const [key, color] of overridden) {
+      if (color === 'empty') continue; // 去掉该格
       const [x, y] = key.split(',').map(Number);
-      return { x, y, color };
-    });
-    const stones = classifyWithHints(
-      { data: gray, width: cv.width, height: cv.height },
-      result.boardSize,
-      hintList,
-      (result.gridCorners as BoardCorners) ?? undefined
-    );
-    return stones.length > 0 ? stones : refinedStones;
-  }, [result, hints, refinedStones]);
+      out.push({ x, y, color } as DetectedStone);
+    }
+    return out;
+  }, [refinedStones, hints]);
 
-  // 渲染时把 warpedGray 载入 canvas
-  const loadWarped = useCallback(() => {
-    if (!result || !warpedGrayCanvasRef.current) return;
-    const img = new Image();
-    img.onload = () => {
-      const cv = warpedGrayCanvasRef.current!;
-      const ctx = cv.getContext('2d')!;
-      cv.width = result.warpedGray.width;
-      cv.height = result.warpedGray.height;
-      ctx.drawImage(img, 0, 0, cv.width, cv.height);
-    };
-    img.src = result.warpedGray.dataBase64.startsWith('data:')
-      ? result.warpedGray.dataBase64
-      : `data:image/png;base64,${result.warpedGray.dataBase64}`;
-  }, [result]);
-
-  // 载入结果时把 warpedGray 同步到隐藏 canvas（供本地 classify）
-  useEffect(() => {
-    loadWarped();
-  }, [loadWarped]);
-
-  // ── ③c 标记黑白空：点某一格 → 添加/切换 hint → 重分类 ──
+  // ── ③c 标记黑白空：点某一格 → 添加/切换 hint → 覆盖该格 ──
   const onIntersectionClick = useCallback((col: number, row: number) => {
     if (!corrMode) return;
     setHints(prev => {
@@ -180,8 +146,8 @@ export default function App() {
     setCorrMode(null);
   }, []);
 
-  // 最终棋盘 = 标记后的全盘分类（无标记时退化为纯 refilter）
-  const finalStones = hints.size > 0 ? hintedStones : refinedStones;
+  // 手动覆盖结果：仅改被点的那一格
+  const finalStones = finalizedStones;
 
   return (
     <div style={{ padding: 20, fontFamily: 'system-ui, sans-serif', maxWidth: 1100, margin: '0 auto' }}>
@@ -286,8 +252,6 @@ export default function App() {
         </section>
       </div>
 
-      {/* wapr 灰度源（隐藏 canvas，供本地 classify） */}
-      <canvas ref={warpedGrayCanvasRef} style={{ display: 'none' }} />
       <p style={{ marginTop: 20, fontSize: 12, color: '#999' }}>
         后端 GET /health 检查模型；本样品前端假设服务已运行在 :8000（见 vite proxy）。
       </p>
