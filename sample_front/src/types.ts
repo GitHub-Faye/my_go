@@ -35,6 +35,16 @@ export interface RecognizeResponse {
   gridCorners: [number, number][] | null;
 }
 
+/** 后端 /api/v1/deadstones 响应（Monte Carlo 死子估计）。 */
+export interface DeadStonesResponse {
+  boardSize: number;
+  /** 领地概率图 float ∈ [-1,1]，正=黑控制、负=白控制。 */
+  probabilityMap: number[][];
+  deadStones: { x: number; y: number }[];
+  blackDeadStones: number;
+  whiteDeadStones: number;
+}
+
 /** 后端 /api/v1/corners 响应（moku 角点检测）。 */
 export interface CornersResponse {
   corners: [number, number][];

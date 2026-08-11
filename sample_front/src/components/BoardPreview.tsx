@@ -13,6 +13,13 @@ interface BoardPreviewProps {
   imageUrl: string | null;
   /** 用户拖好的 4 角（图像坐标 TL/TR/BR/BL）—— 用于 CSS matrix3d 透视背景。 */
   corners: BoardCorners | null;
+  /**
+   * 领地覆盖层：1=黑地 / -1=白地（0 不画），死子标 ×。
+   * 启用后在棋子下方铺半透明色块即可区分死子与领地。
+   */
+  territoryMap?: number[][] | null;
+  /** 被标为死子的坐标（集合 key x,y），绘制 × 标记。 */
+  deadStoneSet?: Set<string>;
 }
 
 // warped 统一空间固定尺寸（后端约定 800）—— 网格角点数值直接落在该空间
@@ -59,6 +66,8 @@ export default function BoardPreview({
   calibrating,
   imageUrl,
   corners,
+  territoryMap,
+  deadStoneSet,
 }: BoardPreviewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -124,9 +133,26 @@ export default function BoardPreview({
     }
     ctx.stroke();
 
-    // 检出棋子：半透明色块（对齐原版 Kaya 配色 —— 黑=透明蓝、白=透明橙）。
+    // 领地覆盖层（死子图与领地合计在一张图）：半透明色铺在每格交点处。
+    // 领地 1=黑(蓝-green 半透明实心块) / -1=白(橙)，画在棋子下方 → 死子仍可见。
     const cellPx = ((WARP_SIZE - 1) / (boardSize - 1)) * scale;
     const r = Math.max(3, cellPx * 0.3);
+    if (territoryMap) {
+      for (let y = 0; y < boardSize; y++) {
+        for (let x = 0; x < boardSize; x++) {
+          const sign = territoryMap[y]?.[x];
+          if (sign !== 1 && sign !== -1) continue;
+          const [cx, cy] = gridToCanvas(x, y, boardSize, scale, gridCorners);
+          // 居中铺在交叉点上（与棋子同中心，色块比棋子略大）
+          const br = cellPx * 0.5;
+          ctx.beginPath();
+          ctx.fillStyle = sign === 1 ? 'rgba(40, 120, 210, 0.28)' : 'rgba(255, 90, 40, 0.28)';
+          ctx.fillRect(cx - br, cy - br, br * 2, br * 2);
+        }
+      }
+    }
+
+    // 检出棋子：半透明色块（对齐原版 Kaya 配色 —— 黑=透明蓝、白=透明橙）。
     for (const s of stones) {
       const [cx, cy] = gridToCanvas(s.x, s.y, boardSize, scale, gridCorners);
       ctx.beginPath();
@@ -149,7 +175,25 @@ export default function BoardPreview({
       ctx.lineWidth = 1.5;
       ctx.stroke();
     }
-  }, [boardSize, stones, hints, gridCorners, containerSize]);
+
+    // 死子 × 标记：叠加在最上层（不影响领地色块）
+    if (deadStoneSet) {
+      const crossR = Math.max(4, cellPx * 0.2);
+      for (const key of deadStoneSet) {
+        const [x, y] = key.split(',').map(Number);
+        if (x < 0 || x >= boardSize || y < 0 || y >= boardSize) continue;
+        const [cx, cy] = gridToCanvas(x, y, boardSize, scale, gridCorners);
+        ctx.strokeStyle = 'rgba(220, 40, 40, 0.95)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx - crossR, cy - crossR);
+        ctx.lineTo(cx + crossR, cy + crossR);
+        ctx.moveTo(cx + crossR, cy - crossR);
+        ctx.lineTo(cx - crossR, cy + crossR);
+        ctx.stroke();
+      }
+    }
+  }, [boardSize, stones, hints, gridCorners, containerSize, territoryMap, deadStoneSet]);
 
   const onClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!calibrating) return;

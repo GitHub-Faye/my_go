@@ -9,8 +9,15 @@
 import { useCallback, useRef, useState, useMemo } from 'react';
 import CornerEditor from './components/CornerEditor';
 import BoardPreview from './components/BoardPreview';
+import ScoreDisplay, { type ScoreBreakdown } from './components/ScoreDisplay';
 import { filterAndMapStones, type DetectedStone, type BoardCorners } from './lib/geometry';
-import type { RecognizeResponse, CornersResponse, StoneColor } from './types';
+import { computeScore, deadStonesToSet } from './lib/scoring';
+import type {
+  RecognizeResponse,
+  CornersResponse,
+  DeadStonesResponse,
+  StoneColor,
+} from './types';
 
 // 灵敏度滑杆（0..1）直接对应原版 Kaya 的 mokuThreshold：默认 0.965（高敏感）。
 // 显示的阈值 = 1 − 灵敏度：灵敏度越高 → 阈值越低 → 显示更多棋子。
@@ -40,6 +47,11 @@ export default function App() {
   const [corrMode, setCorrMode] = useState<CorrState>(null);
   const [sensitivity, setSensitivity] = useState(DEFAULT_SENSITIVITY); // 0..1 灵敏度
 
+  // ── 死子估计 + 记分 ──
+  const [deadstones, setDeadstones] = useState<DeadStonesResponse | null>(null);
+  const [computingDeadstones, setComputingDeadstones] = useState(false);
+  const KOMI = 6.5; // 白方贴目（与后端默认一致）
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // 原图（本地 refilter / classify 需要原图做 warp？—— 用服务端返回的 corners + warpedGray 即可）
@@ -66,6 +78,7 @@ export default function App() {
       setCornersManual(false);
       setResult(null);
       setHints(new Map());
+      setDeadstones(null);
     };
     img.src = url;
   }, []);
@@ -130,6 +143,7 @@ export default function App() {
       }
       const body: RecognizeResponse = await res.json();
       setResult(body);
+      setDeadstones(null); // 新局面 → 清空旧死子/记分
       setCornersManual(true);
       setHints(new Map());
       // 重置滑杆到默认灵敏度（0.965 → 阈值 0.035，与后端 stones 粗滤一致）
@@ -187,6 +201,69 @@ export default function App() {
 
   // 手动覆盖结果：仅改被点的那一格
   const finalStones = finalizedStones;
+
+  // ── ②b 计算死子：把最终棋盘 signMap 发给后端，打 Monte Carlo 领地概率图 ──
+  const computeDeadStones = useCallback(async () => {
+    if (result === null) return;
+    setComputingDeadstones(true);
+    setError(null);
+    try {
+      // 由当前最终棋子构造成 signMap[y][x]：1=黑 / -1=白 / 0=空
+      const size = result.boardSize;
+      const signMap: number[][] = Array.from({ length: size }, () => Array<number>(size).fill(0));
+      for (const s of finalStones) {
+        if (s.x < 0 || s.x >= size || s.y < 0 || s.y >= size) continue;
+        signMap[s.y][s.x] = s.color === 'black' ? 1 : -1;
+      }
+      const body = JSON.stringify({ signMap, iterations: 2000 });
+      const res = await fetch('/api/v1/deadstones', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`HTTP ${res.status}: ${txt.slice(0, 200)}`);
+      }
+      const data: DeadStonesResponse = await res.json();
+      setDeadstones(data);
+    } catch (e) {
+      setError(`计算死子失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setComputingDeadstones(false);
+    }
+  }, [result, finalStones]);
+
+  // ── ③d 本地记分：死子已知后纯前端算，亚毫秒级零网络往返 ──
+  // 死子集与领地（prob 图补单官）合成到棋盘 —— 死子 × + 领地半透明色叠画。
+  const scoreResult = useMemo<
+    | (ScoreBreakdown & { territoryMap: number[][]; deadStoneSet: Set<string>; winner: 'black' | 'white' | 'draw' })
+    | null
+  >(() => {
+    if (result === null || deadstones === null) return null;
+    const size = result.boardSize;
+    const signMap: number[][] = Array.from({ length: size }, () => Array<number>(size).fill(0));
+    for (const s of finalStones) {
+      if (s.x < 0 || s.x >= size || s.y < 0 || s.y >= size) continue;
+      signMap[s.y][s.x] = s.color === 'black' ? 1 : -1;
+    }
+    const deadStoneSet = deadStonesToSet(deadstones.deadStones);
+    const est = computeScore(signMap, deadStoneSet, KOMI, deadstones.probabilityMap);
+
+    const winner = est.blackScore > est.whiteScore ? 'black' : est.whiteScore > est.blackScore ? 'white' : 'draw';
+    return {
+      blackTerritory: est.blackTerritory,
+      whiteTerritory: est.whiteTerritory,
+      blackDeadStones: est.blackDeadStones,
+      whiteDeadStones: est.whiteDeadStones,
+      blackScore: est.blackScore,
+      whiteScore: est.whiteScore,
+      komi: KOMI,
+      territoryMap: est.territoryMap,
+      deadStoneSet,
+      winner,
+    };
+  }, [result, deadstones, finalStones]);
 
   return (
     <div style={{ padding: 20, fontFamily: 'system-ui, sans-serif', maxWidth: 1100, margin: '0 auto' }}>
@@ -296,6 +373,19 @@ export default function App() {
                   </span>
                 </div>
               </div>
+              <div style={{ marginTop: 10 }}>
+                <button
+                  onClick={computeDeadStones}
+                  disabled={computingDeadstones}
+                  style={{ padding: '6px 16px', fontWeight: 600 }}
+                >
+                  {computingDeadstones
+                    ? '计算死子中…（Monte Carlo）'
+                    : deadstones
+                      ? '重新计算死子'
+                      : '🀄 计算死子'}
+                </button>
+              </div>
               <BoardPreview
                 boardSize={result.boardSize}
                 stones={finalStones}
@@ -305,10 +395,38 @@ export default function App() {
                 calibrating={corrMode !== null}
                 imageUrl={imageUrl}
                 corners={corners}
+                territoryMap={scoreResult?.territoryMap ?? null}
+                deadStoneSet={scoreResult?.deadStoneSet}
               />
               <div style={{ marginTop: 8, fontSize: 13 }}>
                 <span>检出 {finalStones.length} 子 </span>
+                {deadstones && (
+                  <span style={{ marginLeft: 8, color: '#555' }}>
+                    · 死子（黑 {deadstones.blackDeadStones} / 白 {deadstones.whiteDeadStones}）
+                  </span>
+                )}
               </div>
+              {scoreResult && (
+                <div
+                  style={{
+                    marginTop: 12,
+                    borderTop: '1px solid #eee',
+                    paddingTop: 10,
+                    display: 'grid',
+                    gridTemplateColumns: 'auto 1fr',
+                    gap: 16,
+                    alignItems: 'start',
+                  }}
+                >
+                  <ScoreDisplay score={scoreResult} winner={scoreResult.winner} />
+                  <div style={{ fontSize: 12, color: '#888', lineHeight: 1.6 }}>
+                    领地按死子清零后 flood fill 封口判官子，单官点用后端概率图 ±0.2 阈值补齐
+                    （<b>估计路径</b>）；分数 = 领地 + 敌死子（黑）+ komi（白）。
+                    <br />
+                    蓝色方块 = 黑地，橙色方块 = 白地，红 × = 死子。
+                  </div>
+                </div>
+              )}
             </>
           ) : (
             <div style={{ color: '#999', border: '1px dashed #ccc', padding: 40, textAlign: 'center' }}>
