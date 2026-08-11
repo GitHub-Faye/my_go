@@ -1,7 +1,8 @@
 /**
  * 前后端分离样品 —— 识别 + 本地微调主流程。
  *
- * ① 网页端手动对齐 4 个角
+ * ① 上传原图 → 可选「自动识别 4 角」（调后端 /api/v1/corners，用 moku 模型）
+ *    → 后端返回 4 角点，前端标注在原图上（可继续手动拖动微调）
  * ② 上传原图 + corners → 后端推理 ONNX
  * ③ 拿回结果 → 本地拖阈值 + 标记黑白空 → 得最终棋局（全部本地重算，不重传图）
  */
@@ -9,7 +10,7 @@ import { useCallback, useRef, useState, useMemo } from 'react';
 import CornerEditor from './components/CornerEditor';
 import BoardPreview from './components/BoardPreview';
 import { filterAndMapStones, type DetectedStone, type BoardCorners } from './lib/geometry';
-import type { RecognizeResponse, StoneColor } from './types';
+import type { RecognizeResponse, CornersResponse, StoneColor } from './types';
 
 // 灵敏度滑杆（0..1）直接对应原版 Kaya 的 mokuThreshold：默认 0.965（高敏感）。
 // 显示的阈值 = 1 − 灵敏度：灵敏度越高 → 阈值越低 → 显示更多棋子。
@@ -28,6 +29,7 @@ export default function App() {
   const [imgDims, setImgDims] = useState({ width: 1, height: 1 });
   const [corners, setCorners] = useState<BoardCorners | null>(null);
   const [cornersManual, setCornersManual] = useState(false);
+  const [detectingCorners, setDetectingCorners] = useState(false);
 
   // ── ②③ 服务端结果 + 本地微调 ──
   const [result, setResult] = useState<RecognizeResponse | null>(null);
@@ -67,6 +69,43 @@ export default function App() {
     };
     img.src = url;
   }, []);
+
+  // ── ①b 自动识别 4 角：上传原图 → 后端 /api/v1/corners（moku 角点检测）──
+  const detectCorners = useCallback(async () => {
+    if (!imageUrl) return;
+    setDetectingCorners(true);
+    setError(null);
+    try {
+      const blob = await fetch(imageUrl).then(r => r.blob());
+      const fd = new FormData();
+      fd.append('image', blob, 'photo.png');
+      const res = await fetch('/api/v1/corners', {
+        method: 'POST',
+        body: fd,
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`HTTP ${res.status}: ${txt.slice(0, 200)}`);
+      }
+      const body: CornersResponse = await res.json();
+      // 后端返回 [x,y]×4（TL/TR/BR/BL），直接用于 CornerEditor。
+      // Moku 已按顺时针排好序；直接用即可。
+      const detected = body.corners as BoardCorners;
+      // rebuilt=true 表示 Moku 四角不构成近似四边形，已用可靠锚点重建仿四边形
+      // 并交给经典 CV 矫正——此时提示用户检查四角对齐。
+      if (body.rebuilt) {
+        setError(
+          'Moku 检出的四角不构成近似四边形，已用可靠锚点重建并交给经典 CV 矫正。请检查四角对齐，必要时手动拖动微调。',
+        );
+      }
+      setCorners(detected);
+      setCornersManual(true);
+    } catch (e) {
+      setError(`自动识别角点失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDetectingCorners(false);
+    }
+  }, [imageUrl]);
 
   // ── ② 上传原图 + corners → 后端 ──
   const recognize = useCallback(async () => {
@@ -153,7 +192,7 @@ export default function App() {
     <div style={{ padding: 20, fontFamily: 'system-ui, sans-serif', maxWidth: 1100, margin: '0 auto' }}>
       <h1>前后端分离棋盘识别样品</h1>
       <p style={{ color: '#555' }}>
-        ① 手动对齐 4 角 → ② 上传后端推理 → ③ 本地拖阈值 / 标记黑白空
+        ① 上传棋局图片 → 后端识别 4 角 → 标注原图 → ② 上传推理 → ③ 本地拖阈值 / 标记黑白空
       </p>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
@@ -166,6 +205,34 @@ export default function App() {
             accept="image/*"
             onChange={e => e.target.files?.[0] && handleFile(e.target.files[0])}
           />
+          <div style={{ marginTop: 8 }}>
+            <button
+              onClick={detectCorners}
+              disabled={!imageUrl || detectingCorners}
+              style={{ marginRight: 8 }}
+            >
+              {detectingCorners ? '识别角点中…' : '🤖 自动识别 4 角（后端）'}
+            </button>
+            {corners && (
+              <button
+                onClick={() => {
+                  // 复位到默认内缩角点
+                  const w = imgDims.width;
+                  const h = imgDims.height;
+                  const m = Math.min(w, h) * 0.05;
+                  setCorners([
+                    [m, m],
+                    [w - 1 - m, m],
+                    [w - 1 - m, h - 1 - m],
+                    [m, h - 1 - m],
+                  ] as BoardCorners);
+                  setCornersManual(false);
+                }}
+              >
+                重置角点
+              </button>
+            )}
+          </div>
           {imageUrl && (
             <div style={{ width: '100%', aspectRatio: '1', border: '1px solid #ccc', marginTop: 10 }}>
               <CornerEditor
@@ -183,7 +250,7 @@ export default function App() {
             </button>
             {corners && (
               <span style={{ marginLeft: 8, fontSize: 12, color: cornersManual ? '#0a0' : '#888' }}>
-                {cornersManual ? '角点已手动调整' : '点击角点拖动'}
+                {cornersManual ? '角点已标注' : '点击角点拖动'}
               </span>
             )}
           </div>

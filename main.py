@@ -158,6 +158,151 @@ def health():
     }
 
 
+@app.post("/api/v1/corners")
+async def corners_only(
+    image: UploadFile = File(...),
+):
+    """用 Moku RT-DETR 识别棋盘 4 角（独立于棋盘状态识别流程）。
+
+    流程（对齐用户设计）：
+      ① Moku 检角点类候选 → 去重。去重后不足 4 点 → 直接 400 报错
+        （而不是用 2/3 点硬推，避免造出不可靠的角）。
+      ② 取 top4 按 TL → TR → BR → BL 排序。若 4 点构成近似四边形
+        （任取 3 点构成的三角形都非退化），直接返回，cornersDetected=true。
+      ③ 若 4 点不构成近似四边形：用其中可靠的锚点子集（优先 3 点、退而
+        求其次 2 点），求中心点并用镜像/平行四边形中点公式重建缺失点，
+        得到仿四边形。
+      ④ 把仿四边形丢给经典 CV 二次矫正（轮廓凸包多边形逼近，更贴合畸变）。
+        CV 检得出 → 用 CV 结果；CV 检不出 → 返回仿四边形本身。
+        （不退回整盘内缩——那会丢掉可靠的锚点。）
+
+    响应：
+      - `corners`      [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]，原图坐标
+      - `order`        固定 "TL/TR/BR/BL"
+      - `cornersDetected`  直接用 moku 4 角（true）/ 重建+CV 矫正（false）
+      - `mokuRawCorners`   Moku 推断出的原始四角（供前端对照），重建时非空
+
+    复用 moku_postprocess 的角点推断逻辑，保证两端输出一致。
+    """
+    detector = get_detector()
+
+    raw = await image.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="空文件")
+
+    try:
+        pil = Image.open(BytesIO(raw))
+        pil.load()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"无法解析图片：{e}")
+
+    # 统一为 RGBA uint8 (H, W, 4) —— 与 /api/v1/recognize 一致
+    if pil.mode != "RGBA":
+        pil = pil.convert("RGBA")
+    arr = np.asarray(pil)
+
+    # 跑一次推理，直接取角点类的检测，用与 recognize 相同的推断逻辑
+    logits, pred_boxes = detector._run_inference(arr)
+    import math
+
+    from kaya_go.classic_cv import find_board_corners
+    from kaya_go.corners import (
+        order_corners,
+        quad_is_plausible,
+        select_reliable_candidates,
+    )
+    from kaya_go.moku_postprocess import (
+        _infer_top4,
+        CLASS_BOARD_CORNER,
+        NUM_QUERIES,
+        sigmoid,
+    )
+    from kaya_go.types import MokuRawDetection
+
+    H, W = arr.shape[0], arr.shape[1]
+    logits = np.asarray(logits).reshape(NUM_QUERIES, 3)
+    pred_boxes = np.asarray(pred_boxes).reshape(NUM_QUERIES, 4)
+
+    corner_candidates: list[MokuRawDetection] = []
+    for q in range(NUM_QUERIES):
+        sc = sigmoid(logits[q])
+        best = int(np.argmax(sc))
+        score = float(sc[best])
+        if best == CLASS_BOARD_CORNER and score >= 0.005:
+            cx = float(pred_boxes[q, 0]) * W
+            cy = float(pred_boxes[q, 1]) * H
+            corner_candidates.append(
+                MokuRawDetection(cx=cx, cy=cy, class_id=best, score=score)
+            )
+
+    # 去重（5% 对角线内的重叠角点取高分）
+    corner_candidates.sort(key=lambda d: d.score, reverse=True)
+    dedupe_min_dist = math.hypot(W, H) * 0.05
+    deduped: list[MokuRawDetection] = []
+    for det in corner_candidates:
+        if not deduped or all(
+            math.hypot(det.cx - o.cx, det.cy - o.cy) >= dedupe_min_dist
+            for o in deduped
+        ):
+            deduped.append(det)
+
+    # ① 不足 4 点 → 直接报错（不硬推，避免造出不可靠角点）
+    if len(deduped) < 4:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Moku 仅检出 {len(deduped)} 个角点（不足 4 个），无法识别棋盘。"
+            "请换更清晰的棋盘照片，或手动拖 4 角。",
+        )
+
+    top4 = list(_infer_top4(deduped, W, H))
+    corners = order_corners(top4)
+    moku_raw_corners = [list(pt) for pt in corners]
+
+    # ② 4 点构成近似四边形 → 直接用
+    if quad_is_plausible(corners, W, H):
+        return {
+            "corners": [[x, y] for x, y in corners],
+            "order": "TL/TR/BR/BL",
+            "cornersDetected": True,
+            "mokuRawCorners": moku_raw_corners,
+        }
+
+    # ③ 4 点不构成近似四边形：挑可靠锚点（3 点优先、2 点兜底）重建仿四边形
+    reliable = select_reliable_candidates(list(corners), W, H)
+    if len(reliable) >= 2:
+        reconstructed = _infer_top4(
+            [
+                MokuRawDetection(cx=x, cy=y, class_id=CLASS_BOARD_CORNER, score=0.0)
+                for x, y in reliable
+            ],
+            W,
+            H,
+        )
+        recovered = order_corners(reconstructed)
+        corners = recovered
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Moku 检出的角点过于塌缩，找不到可靠锚点重建棋盘，请手动拖 4 角。",
+        )
+
+    # ④ 仿四边形作为搜索范围(mask)约束，丢给经典 CV 在范围内二次矫正；
+    #    CV 在 mask 内检得出 → 用 CV 结果；检不出 → 以仿四边形为准（不掉
+    #    moku 可靠锚点，也不整盘内缩）。
+    cv_corners = find_board_corners(arr, mask_corners=recovered)
+    if cv_corners is not None:
+        corners = cv_corners
+    else:
+        corners = recovered
+    return {
+        "corners": [[x, y] for x, y in corners],
+        "order": "TL/TR/BR/BL",
+        "cornersDetected": False,
+        "mokuRawCorners": moku_raw_corners,
+        "rebuilt": True,
+    }
+
+
 @app.post("/api/v1/recognize")
 async def recognize(
     image: UploadFile = File(...),

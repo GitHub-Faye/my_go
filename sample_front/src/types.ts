@@ -34,3 +34,14 @@ export interface RecognizeResponse {
   warpedGray: WarpedGray;
   gridCorners: [number, number][] | null;
 }
+
+/** 后端 /api/v1/corners 响应（moku 角点检测）。 */
+export interface CornersResponse {
+  corners: [number, number][];
+  order: 'TL/TR/BR/BL';
+  cornersDetected: boolean;
+  /** 重建/回退时携带的 moku 原始四角（供前端对照），直接取用时可不返回 */
+  mokuRawCorners?: [number, number][] | null;
+  /** true = 4 角不构成近似四边形，已用可靠锚点重建仿四边形（+经典 CV 矫正） */
+  rebuilt?: boolean;
+}

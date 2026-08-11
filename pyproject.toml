@@ -9,8 +9,10 @@ dependencies = [
     "maturin>=1.14.1",
     "numpy>=2.4.6",
     "onnxruntime>=1.28.0",
+    "opencv-python>=5.0.0.93",
     "pillow>=12.3.0",
     "python-multipart>=0.0.32",
+    "scipy>=1.17.1",
 ]
 
 # 使 `src/kaya_go` 作为 my_go 的顶层包可被导入
