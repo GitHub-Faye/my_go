@@ -33,6 +33,7 @@ from kaya_go.scoring import (
     parse_dead_stones,
 )
 from kaya_go.moku_postprocess import DEFAULT_THRESHOLD
+from kaya_go.static_analysis import StaticAnalysisError, analyze_static
 from kaya_go.types import derive_next_to_play
 
 logging.basicConfig(level=logging.INFO)
@@ -474,6 +475,41 @@ def score(req: ScoreRequest):
         blackScore=black_score,
         whiteScore=white_score,
     )
+
+
+@app.get("/api/v1/analyze-position")
+def analyze_position_api(
+    signMap: str,
+    nextToPlay: str | None = Query(default=None, description="该谁走：'B'/'W'；省略则按子数差推断"),
+    komi: float = Query(default=6.5, ge=0.0, description="白方贴目"),
+    includeOwnership: bool = Query(default=True, description="是否返回逐点 ownership 热力图"),
+):
+    """KataGo 单次前馈静态估值：输入棋盘快照，输出黑方胜率/目差/候选着法。
+
+    只做 numVisits=1 的浅推演（不上树搜索），快但依赖模型先验；识别结果
+    (`signMap` + `nextToPlay`) 直接可用。
+    - winRate ∈ [0,1]：黑方胜率（0.5=均势）
+    - scoreLead：目差，正=黑领先、负=白领先
+    - ownership：逐点归属热力图（正=偏向黑），可叠加到棋盘点位
+    - moveSuggestions：模型首选着法（GTP 坐标）与先验概率
+
+    `signMap` 以 JSON 字符串传给 query 参数（GET 便于 curl/浏览器验证）。
+    """
+    import json as _json
+
+    try:
+        sm = _json.loads(signMap)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"signMap 须为 JSON 数组：{e}") from e
+    try:
+        return analyze_static(
+            sm,
+            next_to_play=nextToPlay,
+            komi=komi,
+            include_ownership=includeOwnership,
+        )
+    except StaticAnalysisError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 if __name__ == "__main__":
