@@ -33,6 +33,7 @@ from kaya_go.scoring import (
     parse_dead_stones,
 )
 from kaya_go.moku_postprocess import DEFAULT_THRESHOLD
+from kaya_go.types import derive_next_to_play
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -367,6 +368,9 @@ async def recognize(
         raise HTTPException(status_code=500, detail=f"识别失败：{e}")
 
     body = result.to_dict()
+    # `nextToPlay` —— 由棋盘快照按黑白子数差推断该谁走（'B'/'W'/'unknown'），
+    # 供 AI 分析（MCTS 需知道该谁走才能做有意义的推演）。unknown 时由前端让用户指定。
+    body["nextToPlay"] = derive_next_to_play(body["signMap"])
     # 新增中间产物（前后端分离：本地 refilter / 标记黑白空）
     body["detections"] = [
         {"class": d.class_id, "score": round(d.score, 4), "cx": d.cx, "cy": d.cy}

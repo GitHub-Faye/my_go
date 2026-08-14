@@ -45,6 +45,31 @@ def test_health(client):
     assert body["status"] == "ok"
 
 
+def test_derive_next_to_play():
+    """derive_next_to_play：按黑白子数差推断该谁走。"""
+    from kaya_go.types import derive_next_to_play
+
+    equal = [[0] * 9 for _ in range(9)]
+    equal[0][0] = 1
+    equal[0][1] = -1
+    assert derive_next_to_play(equal) == "B"  # 黑白相同 → 黑走
+
+    white_lead = [[0] * 9 for _ in range(9)]
+    white_lead[0][0] = 1
+    white_lead[0][1] = -1
+    white_lead[0][2] = -1
+    assert derive_next_to_play(white_lead) == "W"  # 白多一子 → 白走
+
+    ambiguous = [[0] * 9 for _ in range(9)]
+    ambiguous[0][0] = 1
+    ambiguous[0][1] = 1
+    ambiguous[0][2] = -1
+    assert derive_next_to_play(ambiguous) == "unknown"  # 差 >1 → 无法从快照确定
+
+    empty = [[0] * 19 for _ in range(19)]
+    assert derive_next_to_play(empty) == "B"  # 空盘 → 黑先
+
+
 def test_recognize_endpoint(client, tmp_path):
     img_path = _make_board(path=tmp_path / "board.png")
     with img_path.open("rb") as f:
@@ -59,6 +84,9 @@ def test_recognize_endpoint(client, tmp_path):
     assert body["cornersDetected"] is True
     assert len(body["stones"]) >= 2
     assert body["sgf"].startswith("(;GM[1]FF[4]SZ[19]")
+    # nextToPlay —— 由快照黑白子数差推断；测试图黑 2 白 2，数量推断可能为 B（子数相同）
+    # 或 unknown（若白子漏检致子数差 ≠ 0/1）。
+    assert body["nextToPlay"] in ("B", "W", "unknown")
     # signMap 为 19×19 矩阵；黑/白子数 ≤ 画上去的 2/2（白子置信度低可能漏检）
     sign_map = body["signMap"]
     assert isinstance(sign_map, list) and len(sign_map) == 19

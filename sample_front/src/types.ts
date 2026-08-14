@@ -33,6 +33,8 @@ export interface RecognizeResponse {
   detections: RawDetection[];
   warpedGray: WarpedGray;
   gridCorners: [number, number][] | null;
+  /** 由棋盘快照按黑白子数差推断的该谁走：'B' | 'W' | 'unknown'（用于 AI 分析）。 */
+  nextToPlay: 'B' | 'W' | 'unknown';
 }
 
 /** 后端 /api/v1/deadstones 响应（Monte Carlo 死子估计）。 */
